@@ -1,0 +1,153 @@
+William Chong
+205114665
+Mini Project 1
+
+
+FC kernel:
+
+1. My parallelization strategy was pretty simple where I just tried to
+get a basic thread synchronization to work; for the FC kernel, each thread 
+handles one row - vector dot-product summation.
+   Other strategies I tried implementing mainly involved use of the device
+shared memory so as to allow for faster memory access for each thread. I 
+also employed device and host separate memory to avoid the costly global
+memory accesses via cudaMallocManaged().
+    The limitations of this strategy were I encountered issues when scaling
+up the input/output layers to larger numbers. For Ni=4096 and Nn=1024, the 
+kernel didn't have problems and performed well. However, with Ni=25088 and 
+Nn=4096, the execution ran into illegal memory accesses due to limited
+shared memory space (I believe). Thus for larger inputs, I had to fall back
+on non-shared memory operations which led to at a significant increase in 
+execution time.
+
+2. I played around with several kernel configurations for the FC kernel:
+
+   - FC without shared memory:
+        Class 1 (Ni=4096 and Nn=1024): about 2.75 to 4 ms execution time
+        Class 2 (Ni=25088 and Nn=4096): about 68 to 93 ms execution times
+   - FC with shared memory:
+        Class 1 (Ni=4096 and Nn=1024): about 2.7 to 2.8 ms execution time
+        Class 2 (Ni=10000 and Nn=4096): about 27 ms execution times
+
+    I didn't employ any parallelization across batches, so the execution 
+    time for the trivial execution of 16 times was essentially just running
+    the above kernels sequentially 16 times (so ~16x the execution times).
+
+3. After running nvprof with the dram read throughput option, I found
+   that the kernel (FC w/ shared) on class 2 had a DRAM read throughput
+   of about 134 GB/s. This is versus the 34 GB/s for class 1. I think this
+   means that compute is the limiting factor for this kernel because
+   I wasn't really able to optimize thread parallelization and it seems
+   inefficient with memory accesses; thus leading to many expensive memory 
+   calls.
+
+   It seems like my classifier kernel performs pretty poorly in comparison
+   to the CUDNN roofline model, with the roofline model achieving an 
+   execution time of 39usecs for class 1 and 746usecs for class 2 (1 batch).
+   This is about 2 orders of magnitude faster than my implementation, showing
+   that my thread memory accesses are really poorly optimized and I don't
+   utilize locality very well.
+
+5. Some other optimizations I played around with were loop unrolling with
+`#pragma unroll`, but that didn't give as much of a performance improvement
+as I had hoped. I think utilizing the shared memory was the optimization
+that helped me the most, but also I had a headache trying to debug memory
+access issues. (I'll be the first to admit I put a really poor bandaid solution
+and simply overallocated shared memory to try to patch the problem).
+
+
+
+3D Convolutional kernel:
+--------------------------
+
+1. For this kernel I followed along several Convolutional kernel w/ CUDA 
+guides and tutorials (including the sample one given by NVIDIA for 2D convs).
+So one of the strategies used here again was the use of shared memory to allow
+for faster thread memory access for the common input and mask matrices. The 
+tutorials I followed to create this kernel seemed to manage shared memory
+much more effectively, and was decently reasonable to work with, so I'll
+try to compare the differences in retrospect.
+
+Something that I learned and found interesting was where each thread was used
+twice to access the memory data (in two "batches") and from there on out, was 
+able to reutilize that shared data later. This made memory accesses more
+efficient and less costly (in aggregate). Each thread is thus responsible for
+a single element in the input matrix/tensor. This performed much better than
+the FC kernel, but definitely wasn't as easy to wrap my head around as the 
+previous one. This is something I'd like to review later more in depth and 
+breakdown further.
+
+A weakness of this approach was that I didn't attempt to parallelize across
+batches and so throughput doesn't scale well with this kernel. Another 
+strategy that may be interesting to explore in the future would be to 
+learn how to leverage the tensor cores on the GPU. I've heard a lot about them
+and this is definitely a great usecase for them.
+
+
+2. The execution times for this kernel were pretty decent (I think):
+
+    - Conv1 Nx=224 Ny=224 Kx=3 Ky=3 Ni=64 Nn=64: about 2.7-2.9 msecs 
+
+    - Conv2 Nx=14 Ny=14 Kx=3 Ky=3 Ni=512 Nn=512: about 36.8 usecs 
+
+    Again, here I didn't expressly implement parallelization across batches
+    so I did the trivial/naive implementation.
+
+
+3. Here are the results of the profiling:
+
+For Conv1, both DRAM read and write throughput was in the high 80's GB/s.
+For Conv2, DRAM read throughput was much lower than DRAM write throughput
+(101 MB/s read vs 42 GB/s write).
+
+The difference seems to be that since Conv2 is a much deeper input than Conv1's
+more wider input, this leads to good reuse in terms of DRAM reads (less reads
+necessary to get information for Conv2). Then Conv1 indicates that
+there were about as many reads as there were writes to DRAM meaning
+there were many accesses needed and poor reuse. A limiting factor could thus 
+be scratchpad use or poor use of locality. This is probably a tradeoff that 
+could've been accounted for during the designing of the kernel.
+
+
+CONV1 RESULTS
+Invocations                               Metric Name                            Metric Description         Min         Max         Avg
+Device "TITAN V (0)"
+    Kernel: Convolution3D(float*, float*, float*, int, int, int)
+          1                             flop_count_sp   Floating Point Operations(Single Precision)   173408256   173408256   173408256
+          1                    dram_read_transactions               Device Memory Read Transactions      401976      401976      401976
+          1                   dram_write_transactions              Device Memory Write Transactions      397692      397692      397692
+          1                      dram_read_throughput                 Device Memory Read Throughput  87.083GB/s  87.083GB/s  87.083GB/s
+          1                     dram_write_throughput                Device Memory Write Throughput  86.155GB/s  86.155GB/s  86.155GB/s
+
+CONV2 RESULTS
+Invocations                               Metric Name                            Metric Description         Min         Max         Avg
+Device "TITAN V (0)"
+    Kernel: Convolution3D(float*, float*, float*, int, int, int)
+          1                             flop_count_sp   Floating Point Operations(Single Precision)   173408256   173408256   173408256
+          1                    dram_read_transactions               Device Memory Read Transactions      401976      401976      401976
+          1                   dram_write_transactions              Device Memory Write Transactions      397692      397692      397692
+          1                      dram_read_throughput                 Device Memory Read Throughput  87.083GB/s  87.083GB/s  87.083GB/s
+          1                     dram_write_throughput                Device Memory Write Throughput  86.155GB/s  86.155GB/s  86.1
+
+
+4. Compared to the CUDNN Benchmark results provided by the professor:
+
+CONV1:
+- CUDNN: 342 usec execution time.
+- CUDA kernel at 2.8 ms
+
+CONV2:
+- benchmarked CUDNN at execution time of 186 usecs
+- CUDA kernel at 36.8 usecs
+
+To me this shows that this kernel definitely heavily favors the CONV2 workload
+parameters over the CONV1 wider neurons (which had a much slower time than
+the benchmarked CUDNN results.) This is pretty interesting and I could 
+possibly look further into how different tiling sizes and optimizations affect
+this performance balance.
+
+
+5. The shared memory optimization was again the most helpful and useful here
+and worked really well! I was surprised at how well it performed compared to my
+more simple and much more naive FC kernel implementation. The pragma unrolling
+again wasn't too helpful.
